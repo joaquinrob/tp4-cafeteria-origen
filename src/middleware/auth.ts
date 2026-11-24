@@ -4,12 +4,9 @@ import { obtenerSesion } from './sesion';
 import type { Rol } from '../tipos';
 
 /**
- * Middlewares de autenticación y autorización.
- *
- * `requiereRol` está IMPLEMENTADO, pero OJO: en las rutas de administración
- * (src/routes/admin.routes.ts) NO se usa. Eso es una falla de autorización:
- * cualquier usuario autenticado —incluso uno con rol "cliente"— puede
- * crear/borrar productos, cambiar contraseñas o ejecutar comandos.
+ * Middlewares de autenticacion y autorizacion.
+ * requiereRol('admin') ahora se usa en admin.routes, debug.routes y para
+ * borrar resenas.
  */
 
 /** Exige que haya una sesión válida. */
