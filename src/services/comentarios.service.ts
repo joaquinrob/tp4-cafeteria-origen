@@ -1,31 +1,23 @@
 import * as db from '../db';
+import { errorValidacion, validarEntero, validarTexto } from '../validacion';
 import type { Comentario } from '../tipos';
 
-/** Datos de una reseña nueva, tal como llegan en el cuerpo de la petición. */
+/** Datos de una resena nueva, tal como llegan en el cuerpo de la peticion. */
 export interface NuevoComentario {
   autor: string;
   texto: string;
   calificacion: number;
 }
 
+export const MAX_LONGITUD_AUTOR = 40;
+export const MAX_LONGITUD_TEXTO = 500;
+
 /**
- * Servicio de comentarios / reseñas de la cafetería.
+ * Servicio de comentarios / resenas.
  *
- * -----------------------------------------------------------------------------
- * FALLA — Validación de entrada débil (OWASP A04:2021)
- * -----------------------------------------------------------------------------
- * No se valida longitud, ni formato, ni que la calificación esté en rango.
- *
- * -----------------------------------------------------------------------------
- * FALLA — Cross-Site Scripting almacenado (OWASP A03:2021)
- * -----------------------------------------------------------------------------
- * El texto del comentario se guarda tal cual y luego se devuelve en las
- * respuestas JSON que la web inserta en el DOM. Como el cliente lo pinta con
- * innerHTML, el script queda almacenado en la base y se ejecuta en el
- * navegador de CADA visitante (incluidos los administradores).
- *
- * Corrección: escapar/sanear la salida en el cliente (textContent en vez de
- * innerHTML) o, mejor, sanitizar en el servidor y aplicar CSP como capa extra.
+ * El texto se valida (largo y calificacion de 1 a 5) antes de guardarlo.
+ * El XSS almacenado se corrige del lado del cliente: las resenas se pintan
+ * con textContent y no con innerHTML, y ademas hay CSP.
  */
 
 /** Lista todos los comentarios, del más nuevo al más viejo. */
@@ -37,8 +29,14 @@ export async function listar(): Promise<Comentario[]> {
 }
 
 /** Crea un comentario. */
-export async function crear({ autor, texto, calificacion }: NuevoComentario): Promise<Comentario> {
-  // FALLA: sin validación de longitud ni de rango de calificación.
+export async function crear(datos: Partial<NuevoComentario>): Promise<Comentario> {
+  const autor = validarTexto(datos.autor, 'autor', MAX_LONGITUD_AUTOR);
+  const texto = validarTexto(datos.texto, 'texto', MAX_LONGITUD_TEXTO);
+  const calificacion = validarEntero(datos.calificacion, 1, 5);
+  if (!calificacion) {
+    throw errorValidacion('La calificacion tiene que ser un numero del 1 al 5.');
+  }
+
   const { rows } = await db.query<Comentario>(
     `INSERT INTO comentarios (autor, texto, calificacion)
      VALUES ($1, $2, $3)
