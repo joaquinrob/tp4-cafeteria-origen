@@ -1,30 +1,34 @@
+import bcrypt from 'bcryptjs';
 import * as db from '../db';
 import type { Usuario } from '../tipos';
 
 /**
  * Servicio de usuarios.
  *
- * -----------------------------------------------------------------------------
- * FALLA — Inyección SQL (OWASP A03:2021)
- * -----------------------------------------------------------------------------
- * La consulta del login concatena el usuario y la contraseña directamente
- * dentro del texto SQL. El motor de PostgreSQL interpreta las comillas y los
- * operadores que venga en la entrada, de modo que la condición se puede
- * reescribir por completo y devolver una fila válida sin conocer la clave.
- *
- * Además:
- *  - La contraseña se compara en texto plano (almacenamiento inseguro).
- *  - El mensaje de error distingue "usuario inexistente" de "contraseña
- *    incorrecta" (enumeración de usuarios).
- *  - No hay límite de intentos (fuerza bruta).
- *
- * Corrección: consultas parametrizadas (`WHERE username = $1 AND password = $2`
- * con bcrypt.compare), mensaje genérico de error, y rate limiting + bloqueo
- * temporal en el endpoint de login.
- * -----------------------------------------------------------------------------
+ * Cambios de seguridad:
+ *  - el login usa una consulta parametrizada (antes se concatenaba el usuario
+ *    y la contrasena en el SQL y se podia entrar con ' OR 1=1 --)
+ *  - las contrasenas se guardan con bcrypt y se comparan con bcrypt.compare
+ *  - nunca se devuelve la columna password hacia afuera
  */
 
-/** Busca un usuario por nombre de usuario exacto (query parametrizada). */
+export const RONDAS_BCRYPT = 10;
+
+// Columnas que se pueden devolver (sin el hash de la contrasena)
+const COLUMNAS_PUBLICAS = 'id, username, rol, nombre, creado_en';
+
+// Hash de relleno para que el login tarde lo mismo exista o no el usuario
+const HASH_FALSO = bcrypt.hashSync('no-es-una-clave-real', RONDAS_BCRYPT);
+
+export function hashear(password: string): Promise<string> {
+  return bcrypt.hash(password, RONDAS_BCRYPT);
+}
+
+export function esHash(valor: string): boolean {
+  return /^\$2[aby]\$\d{2}\$/.test(valor);
+}
+
+/** Busca un usuario por nombre de usuario exacto. */
 export async function buscarPorUsername(username: string): Promise<Usuario | null> {
   const { rows } = await db.query<Usuario>(
     'SELECT * FROM usuarios WHERE username = $1',
@@ -34,50 +38,63 @@ export async function buscarPorUsername(username: string): Promise<Usuario | nul
 }
 
 /**
- * Autentica a un usuario comparando usuario y contraseña.
- * Devuelve el usuario o null.
+ * Autentica a un usuario. Devuelve el usuario (sin password) o null.
  */
 export async function autenticar(username: string, password: string): Promise<Usuario | null> {
-  // FALLA: inyección SQL — la entrada del usuario se concatena en la consulta.
-  const sql = `SELECT * FROM usuarios WHERE username = '${username}' AND password = '${password}'`;
-  const { rows } = await db.query<Usuario>(sql);
-  return rows[0] || null;
+  if (typeof username !== 'string' || typeof password !== 'string') return null;
+
+  const usuario = await buscarPorUsername(username);
+  const hash = usuario && esHash(usuario.password) ? usuario.password : HASH_FALSO;
+  const coincide = await bcrypt.compare(password, hash);
+
+  if (!usuario || !coincide || hash === HASH_FALSO) return null;
+
+  const { password: _omitida, ...sinPassword } = usuario;
+  return sinPassword as Usuario;
 }
 
-/** Lista todos los usuarios (para el panel de administración). */
-export async function listar(): Promise<Usuario[]> {
-  const { rows } = await db.query<Usuario>('SELECT * FROM usuarios ORDER BY id');
+/** Lista todos los usuarios (para el panel de administracion). */
+export async function listar(): Promise<Omit<Usuario, 'password'>[]> {
+  const { rows } = await db.query<Usuario>(
+    'SELECT ' + COLUMNAS_PUBLICAS + ' FROM usuarios ORDER BY id'
+  );
   return rows;
 }
 
+// Solo estas columnas se pueden modificar desde el panel
+const CAMPOS_EDITABLES = ['username', 'nombre', 'rol', 'password'];
+
 /**
- * Actualiza un usuario.
- * FALLA — Asignación masiva / escalada de privilegios: se actualiza el rol
- * sin verificar que quien llama tenga permiso para hacerlo.
+ * Actualiza un usuario. Los nombres de columna salen de CAMPOS_EDITABLES
+ * (lista blanca) y los valores van como parametros.
  */
-export async function actualizar(id: number | string, cambios: Partial<Usuario>): Promise<Usuario | null> {
+export async function actualizar(id: number, cambios: Partial<Usuario>): Promise<Omit<Usuario, 'password'> | null> {
   const campos: string[] = [];
   const valores: unknown[] = [];
-  let i = 1;
+
   for (const [campo, valor] of Object.entries(cambios)) {
-    campos.push(`${campo} = $${i}`);
-    valores.push(valor);
-    i += 1;
+    if (!CAMPOS_EDITABLES.includes(campo)) continue;
+    let valorFinal = valor;
+    if (campo === 'password') valorFinal = await hashear(String(valor));
+    valores.push(valorFinal);
+    campos.push(`${campo} = $${valores.length}`);
   }
   if (campos.length === 0) return null;
+
   valores.push(id);
   const { rows } = await db.query<Usuario>(
-    `UPDATE usuarios SET ${campos.join(', ')} WHERE id = $${i} RETURNING *`,
+    `UPDATE usuarios SET ${campos.join(', ')} WHERE id = $${valores.length} RETURNING ` + COLUMNAS_PUBLICAS,
     valores
   );
   return rows[0] || null;
 }
 
-/** Cambia la contraseña de un usuario (se guarda en texto plano). */
-export async function cambiarPassword(id: number, nuevaPassword: string): Promise<Usuario | null> {
+/** Cambia la contrasena de un usuario (se guarda hasheada). */
+export async function cambiarPassword(id: number, nuevaPassword: string): Promise<Omit<Usuario, 'password'> | null> {
+  const hash = await hashear(nuevaPassword);
   const { rows } = await db.query<Usuario>(
-    'UPDATE usuarios SET password = $1 WHERE id = $2 RETURNING *',
-    [nuevaPassword, id]
+    'UPDATE usuarios SET password = $1 WHERE id = $2 RETURNING ' + COLUMNAS_PUBLICAS,
+    [hash, id]
   );
   return rows[0] || null;
 }
