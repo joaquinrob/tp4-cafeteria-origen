@@ -1,81 +1,86 @@
 import express from 'express';
+import rateLimit from 'express-rate-limit';
+
 import * as usuarios from '../services/usuarios.service';
-import { crearSesion, destruirSesion, obtenerSesion } from '../middleware/sesion';
+import { borrarCookieSesion, crearSesion, destruirSesion, obtenerSesion } from '../middleware/sesion';
 
 const router = express.Router();
 
+const MENSAJE_LOGIN_FALLIDO = 'Usuario o contrasena incorrectos.';
+const MENSAJE_BLOQUEO = 'Demasiados intentos fallidos. Espera unos minutos y volve a probar.';
+
+// Limite por IP + usuario: 5 intentos fallidos cada 15 minutos.
+// Los logins correctos no cuentan (skipSuccessfulRequests).
+const limitePorCuenta = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  skipSuccessfulRequests: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    const username = req.body && typeof req.body.username === 'string' ? req.body.username : '';
+    return req.ip + '|' + username.toLowerCase();
+  },
+  message: { error: MENSAJE_BLOQUEO },
+});
+
+// Limite general por IP, para el que prueba muchos usuarios distintos
+const limitePorIp = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  skipSuccessfulRequests: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: MENSAJE_BLOQUEO },
+});
+
 /**
- * Inicio de sesión.
- *
- * FALLAS:
- *  - Inyección SQL en la verificación de credenciales (ver usuarios.service).
- *  - Contraseñas almacenadas en texto plano.
- *  - Mensajes de error que distinguen "usuario inexistente" de "contraseña
- *    incorrecta" → enumeración de usuarios.
- *  - Sin rate limiting ni bloqueo: fuerza bruta ilimitada.
- *  - El identificador de sesión no se regenera (fijación de sesión).
+ * Inicio de sesion.
+ * El mensaje de error es siempre el mismo, exista o no el usuario, para que
+ * no se pueda averiguar que cuentas hay.
  */
-router.post('/login', async (req, res, next) => {
+router.post('/login', limitePorIp, limitePorCuenta, async (req, res, next) => {
   try {
     const { username, password } = req.body || {};
 
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Falta usuario o contraseña.' });
+    if (typeof username !== 'string' || typeof password !== 'string' || !username || !password) {
+      return res.status(400).json({ error: 'Falta usuario o contrasena.' });
+    }
+    if (username.length > 50 || password.length > 72) {
+      return res.status(401).json({ error: MENSAJE_LOGIN_FALLIDO });
     }
 
-    // La verificación de credenciales es la consulta concatenada (SQLi).
     const usuario = await usuarios.autenticar(username, password);
-
     if (!usuario) {
-      // FALLA — Enumeración de usuarios: el mensaje distingue entre
-      // "no existe" y "contraseña incorrecta", lo que permite a un atacante
-      // averiguar qué cuentas hay en el sistema.
-      const existe = await usuarios.buscarPorUsername(username);
-      if (existe) {
-        return res.status(401).json({ error: 'La contraseña es incorrecta.' });
-      }
-      return res
-        .status(401)
-        .json({ error: `El usuario "${username}" no existe en el sistema.` });
+      return res.status(401).json({ error: MENSAJE_LOGIN_FALLIDO });
     }
 
-    crearSesion(req, res, {
+    const datosSesion = {
       id: usuario.id,
       username: usuario.username,
       rol: usuario.rol,
       nombre: usuario.nombre,
-    });
+    };
+    crearSesion(req, res, datosSesion);
 
-    res.json({
-      mensaje: `¡Bienvenido, ${usuario.nombre}!`,
-      usuario: {
-        id: usuario.id,
-        username: usuario.username,
-        rol: usuario.rol,
-        nombre: usuario.nombre,
-      },
-    });
+    res.json({ mensaje: 'Bienvenido, ' + usuario.nombre, usuario: datosSesion });
   } catch (err) {
     next(err);
   }
 });
 
-/**
- * Cierre de sesión.
- *
- * FALLA: sólo borra la cookie del navegador. La sesión sigue existiendo en el
- * servidor, así que con la cookie robada se puede seguir usando.
- */
+/** Cierre de sesion: se borra en el servidor y tambien la cookie. */
 router.post('/logout', (req, res) => {
-  res.clearCookie('sid', { path: '/' });
-  res.json({ mensaje: 'Sesión cerrada.' });
+  destruirSesion(req);
+  borrarCookieSesion(res);
+  res.json({ mensaje: 'Sesion cerrada.' });
 });
 
-/** Devuelve el usuario de la sesión actual. */
+/** Devuelve el usuario de la sesion actual. */
 router.get('/yo', (req, res) => {
   const sesion = obtenerSesion(req);
   if (!sesion) {
-    return res.status(401).json({ error: 'Necesitás iniciar sesión.' });
+    return res.status(401).json({ error: 'Necesitas iniciar sesion.' });
   }
   res.json({ usuario: sesion.usuario });
 });

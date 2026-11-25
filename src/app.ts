@@ -1,8 +1,10 @@
 import path from 'path';
 import express from 'express';
+import helmet from 'helmet';
 
 import config from './config';
 import { rutaNoEncontrada, manejadorErrores } from './middleware/errores';
+import { entregarTokenCsrf, verificarCsrf } from './middleware/csrf';
 import authRoutes from './routes/auth.routes';
 import productosRoutes from './routes/productos.routes';
 import pedidosRoutes from './routes/pedidos.routes';
@@ -13,21 +15,34 @@ import debugRoutes from './routes/debug.routes';
 
 const app = express();
 
-/**
- * FALLA — Ajustes de configuración (OWASP A05:2021)
- *
- * Faltan:
- *  - helmet (cabeceras de seguridad: CSP, X-Content-Type-Options, HSTS...)
- *  - límite de tamaño del cuerpo más estricto por ruta
- *  - rate limiting global
- *  - política de CORS restringida al propio origen
- *  - helmet CSP además sirve como capa extra frente al XSS
- */
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true }));
+// Cabeceras de seguridad (CSP, nosniff, X-Frame-Options, Referrer-Policy...)
+// El sitio no usa scripts ni estilos inline, asi que la CSP puede ser estricta.
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'"],
+        imgSrc: ["'self'", 'data:'],
+        objectSrc: ["'none'"],
+        frameAncestors: ["'none'"],
+        formAction: ["'self'"],
+        // en local se usa http, si se fuerza https la pagina no carga
+        upgradeInsecureRequests: null,
+      },
+    },
+  })
+);
 
-// Archivos subidos por el panel de administración.
-app.use('/uploads', express.static(config.uploadsDir));
+// La subida de imagenes viene en base64, necesita un limite mas grande.
+// Para el resto alcanza con 100kb.
+app.use('/api/admin/subir-archivo', express.json({ limit: '3mb' }));
+app.use(express.json({ limit: '100kb' }));
+app.use(express.urlencoded({ extended: false, limit: '100kb' }));
+
+// Archivos subidos por el panel (solo imagenes, ver admin.routes.ts)
+app.use('/uploads', express.static(config.uploadsDir, { dotfiles: 'deny', index: false }));
 
 // Sitio web estático
 app.use(express.static(path.join(__dirname, 'public')));
@@ -36,6 +51,10 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.get('/api/salud', (req, res) => {
   res.json({ ok: true, servicio: 'cafeteria-origen', hora: new Date().toISOString() });
 });
+
+// Token anti-CSRF y verificacion en todo lo que cambia estado
+app.get('/api/csrf-token', entregarTokenCsrf);
+app.use('/api', verificarCsrf);
 
 app.use('/api/auth', authRoutes);
 app.use('/api/productos', productosRoutes);
