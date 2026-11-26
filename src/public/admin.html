@@ -171,7 +171,8 @@
         <div class="card">
           <h3>Cambiar mi contraseña</h3>
           <form id="form-password" novalidate>
-            <label class="field"><span>Nueva contraseña</span><input type="password" id="nueva-password" required></label>
+            <label class="field"><span>Contraseña actual</span><input type="password" id="actual-password" autocomplete="current-password" required></label>
+            <label class="field"><span>Nueva contraseña</span><input type="password" id="nueva-password" autocomplete="new-password" required></label>
             <button type="submit" class="btn btn-primary">Actualizar contraseña</button>
             <p class="form-feedback" id="password-feedback"></p>
           </form>
@@ -187,7 +188,10 @@
               cuando el proveedor cambia de servidor.</p>
             <form id="form-conexion" novalidate>
               <label class="field"><span>Servidor del proveedor</span>
-                <input type="text" id="conexion-host" placeholder="proveedor.origen.com">
+                <select id="conexion-host">
+                  <option value="proveedor.origen.com">proveedor.origen.com</option>
+                  <option value="localhost">localhost</option>
+                </select>
               </label>
               <button type="submit" class="btn btn-primary">Probar conexión</button>
             </form>
