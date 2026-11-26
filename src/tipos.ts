@@ -59,7 +59,8 @@ export type UsuarioSesion = Pick<Usuario, 'id' | 'username' | 'rol' | 'nombre'>;
 export interface Sesion {
   usuario: UsuarioSesion;
   creadaEn: number;
-  expiraEn: number | null;
+  expiraEn: number;
+  ultimoUso: number;
 }
 
 /** Fila de la tabla `pedidos`. */
@@ -98,6 +99,8 @@ export interface Comentario {
 /** Error con código de estado HTTP opcional. */
 export interface ErrorHttp extends Error {
   status?: number;
+  // true si el mensaje se puede mostrar al cliente (errores de validacion)
+  publico?: boolean;
 }
 
 /**

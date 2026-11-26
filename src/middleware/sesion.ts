@@ -1,35 +1,35 @@
 /**
- * Gestión de sesiones.
+ * Gestion de sesiones.
  *
- * -----------------------------------------------------------------------------
- * FALLA — Gestión de sesiones insegura (Autenticación insegura)
- * -----------------------------------------------------------------------------
- * 1. El identificador de sesión es un contador incremental (`sesion_1`,
- *    `sesion_2`, ...): es PREDECIBLE y adivinable. Un atacante puede recorrer
- *    los valores y usurpar la sesión de otro usuario (fijación de sesión).
- * 2. La cookie se emite SIN `httpOnly` (JavaScript puede leerla), SIN `secure`
- *    (viaja en texto plano por HTTP) y SIN `sameSite` (el navegador la manda
- *    también en peticiones desde otros sitios → facilita CSRF).
- * 3. Las sesiones NO expiran nunca.
- * 4. Al iniciar sesión no se regenera el identificador.
- * 5. El cierre de sesión sólo borra la cookie del cliente: la sesión sigue
- *    viva en el servidor.
- *
- * Corrección: usar crypto.randomUUID() (o crypto.randomBytes -> hex) para el
- * id, con expiración por inactividad y absoluta, cookie con
- * { httpOnly: true, secure: true, sameSite: 'lax' }, regeneración del id tras
- * el login y borrado de la sesión en el servidor al hacer logout.
- * -----------------------------------------------------------------------------
+ * Cambios:
+ *  - el id de sesion es aleatorio (crypto.randomBytes), antes era sesion_1,
+ *    sesion_2... y se podia adivinar la sesion de otro
+ *  - la cookie va con httpOnly, sameSite y secure (secure solo en produccion
+ *    porque en local se usa http)
+ *  - las sesiones vencen por inactividad y por tiempo maximo
+ *  - al hacer login se borra la sesion anterior (se regenera el id)
  */
 
+import crypto from 'crypto';
 import type { Request, Response } from 'express';
 
+import config from '../config';
 import type { Sesion, UsuarioSesion } from '../tipos';
 
 export const sesiones = new Map<string, Sesion>();
-let contadorSesiones = 0;
 
-/** Lee las cookies de la petición (parser mínimo, sin dependencias). */
+// Tiempo maximo de una sesion y tiempo maximo sin usarla
+const TTL_SESION = 8 * 60 * 60 * 1000;
+const TTL_INACTIVIDAD = 30 * 60 * 1000;
+
+const opcionesCookie = {
+  path: '/',
+  httpOnly: true,
+  sameSite: 'lax' as const,
+  secure: config.nodeEnv === 'production',
+};
+
+/** Lee las cookies de la peticion (parser minimo, sin dependencias). */
 export function leerCookies(req: Request): Record<string, string> {
   const cookies: Record<string, string> = {};
   const header = req.headers.cookie;
@@ -39,42 +39,69 @@ export function leerCookies(req: Request): Record<string, string> {
     if (separador < 0) continue;
     const nombre = parte.slice(0, separador).trim();
     const valor = parte.slice(separador + 1).trim();
-    if (nombre) cookies[nombre] = decodeURIComponent(valor);
+    try {
+      if (nombre) cookies[nombre] = decodeURIComponent(valor);
+    } catch {
+      // cookie mal codificada, se ignora
+    }
   }
   return cookies;
 }
 
-/** Crea una sesión nueva para el usuario y setea la cookie. */
+/** Crea una sesion nueva para el usuario y setea la cookie. */
 export function crearSesion(req: Request, res: Response, usuario: UsuarioSesion): string {
-  contadorSesiones += 1;
+  // si ya venia con una sesion se descarta, asi el id cambia despues del login
+  destruirSesion(req);
 
-  // FALLA: identificador predecible.
-  const id = `sesion_${contadorSesiones}`;
+  const id = crypto.randomBytes(32).toString('hex');
+  const ahora = Date.now();
 
-  // FALLA: la sesión nunca expira.
   sesiones.set(id, {
     usuario,
-    creadaEn: Date.now(),
-    expiraEn: null,
+    creadaEn: ahora,
+    expiraEn: ahora + TTL_SESION,
+    ultimoUso: ahora,
   });
 
-  // FALLA: cookie sin httpOnly / secure / sameSite.
-  res.cookie('sid', id, { path: '/' });
+  res.cookie('sid', id, { ...opcionesCookie, maxAge: TTL_SESION });
 
   return id;
 }
 
-/** Devuelve la sesión de la petición, si existe. */
+/** Devuelve la sesion de la peticion, si existe y no esta vencida. */
 export function obtenerSesion(req: Request): Sesion | null {
-  const cookies = leerCookies(req);
-  const id = cookies.sid;
+  const id = leerCookies(req).sid;
   if (!id) return null;
-  return sesiones.get(id) || null;
+
+  const sesion = sesiones.get(id);
+  if (!sesion) return null;
+
+  const ahora = Date.now();
+  if (ahora > sesion.expiraEn || ahora - sesion.ultimoUso > TTL_INACTIVIDAD) {
+    sesiones.delete(id);
+    return null;
+  }
+
+  sesion.ultimoUso = ahora;
+  return sesion;
 }
 
-/** Cierra la sesión en el servidor (debería llamarse en el logout). */
+/** Borra la sesion del servidor. */
 export function destruirSesion(req: Request): void {
-  const cookies = leerCookies(req);
-  const id = cookies.sid;
+  const id = leerCookies(req).sid;
   if (id) sesiones.delete(id);
 }
+
+export function borrarCookieSesion(res: Response): void {
+  res.clearCookie('sid', opcionesCookie);
+}
+
+// Limpieza de sesiones vencidas cada 10 minutos
+setInterval(() => {
+  const ahora = Date.now();
+  for (const [id, sesion] of sesiones) {
+    if (ahora > sesion.expiraEn || ahora - sesion.ultimoUso > TTL_INACTIVIDAD) {
+      sesiones.delete(id);
+    }
+  }
+}, 10 * 60 * 1000).unref();

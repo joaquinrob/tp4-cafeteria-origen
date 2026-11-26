@@ -1,6 +1,6 @@
 import express from 'express';
 import * as catalogo from '../services/catalogo.service';
-import type { FiltrosCatalogo } from '../services/catalogo.service';
+import { validarId } from '../validacion';
 
 const router = express.Router();
 
@@ -8,26 +8,23 @@ const router = express.Router();
  * GET /api/productos?tipo=&variedad=&q=
  * Lista el catálogo con filtros opcionales.
  *
- * FALLA — Inyección SQL: los filtros llegan concatenados al texto SQL
- * (ver services/catalogo.service.ts).
- *
- * FALLA — XSS reflejado: la respuesta incluye los filtros que mandó el
- * cliente y el sitio web los pinta con innerHTML. Un `<script>` en `q` se
- * ejecuta en el navegador de quien hizo la búsqueda.
+ * Los filtros se pasan como parámetros en el servicio (ya no hay SQL
+ * concatenado). El eco de los filtros se sigue devolviendo pero el sitio lo
+ * pinta con textContent, así que no se ejecuta como HTML.
  */
+function textoQuery(valor: unknown, max: number): string {
+  return typeof valor === 'string' ? valor.slice(0, max) : '';
+}
+
 router.get('/', async (req, res, next) => {
   try {
-    const productos = await catalogo.listar(req.query as FiltrosCatalogo);
-    res.json({
-      productos,
-      // Se devuelve el eco de los filtros: es el vector del XSS reflejado.
-      filtros: {
-        tipo: req.query.tipo || '',
-        variedad: req.query.variedad || '',
-        q: req.query.q || '',
-      },
-      total: productos.length,
-    });
+    const filtros = {
+      tipo: textoQuery(req.query.tipo, 20),
+      variedad: textoQuery(req.query.variedad, 20),
+      q: textoQuery(req.query.q, 50),
+    };
+    const productos = await catalogo.listar(filtros);
+    res.json({ productos, filtros, total: productos.length });
   } catch (err) {
     next(err);
   }
@@ -46,16 +43,15 @@ router.get('/variedades', async (req, res, next) => {
  * GET /api/productos/:id
  * Devuelve un producto.
  *
- * FALLA — Inyección SQL en el id (el id se mete en la consulta entre comillas).
- * FALLA — XSS reflejado: el mensaje de error incluye el id recibido.
+ * El id se valida como entero y el mensaje de error ya no repite lo que
+ * mandó el cliente (antes eso era un XSS reflejado).
  */
 router.get('/:id', async (req, res, next) => {
   try {
-    const producto = await catalogo.obtener(req.params.id);
+    const id = validarId(req.params.id);
+    const producto = id ? await catalogo.obtener(id) : null;
     if (!producto) {
-      return res
-        .status(404)
-        .json({ error: `No existe el producto "${req.params.id}".` });
+      return res.status(404).json({ error: 'Producto no encontrado.' });
     }
     res.json(producto);
   } catch (err) {

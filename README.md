@@ -17,7 +17,7 @@ que los alumnos tienen que encontrar, observar, explicar y corregir.
 Requisitos: **Docker Desktop** (o Docker Engine + Compose v2).
 
 ```bash
-cd cafeteria-origen
+cd tp4-cafeteria-origen
 docker compose up -d --build
 ```
 
@@ -92,13 +92,16 @@ El objetivo es que termine en `✔` sin que se rompan los tests.
 
 | Usuario | Contraseña | Rol | Qué sirve para |
 |---|---|---|---|
-| `admin` | `admin` | admin | Credencial **por defecto** (falla de configuración) |
-| `valentina` | `origen2024` | admin | La dueña del negocio |
-| `barista` | `cafe123` | barista | Usuario legítimo no administrador |
-| `mozo` | `mozo123` | mozo | Personal de sala |
-| `cliente` | `cliente` | cliente | Para probar la **escalada de privilegios** |
+| `admin` | `Admin_Origen_24!` | admin | Cuenta de administracion |
+| `valentina` | `Vale_Origen_24!` | admin | La duena del negocio |
+| `barista` | `Barista_Cafe_24!` | barista | Usuario legitimo no administrador |
+| `mozo` | `Mozo_Sala_24!` | mozo | Personal de sala |
+| `cliente` | `Cliente_Web_24!` | cliente | Para probar que no puede entrar al panel |
 
-Las contraseñas están en **texto plano** en la base (falla intencional).
+Las contrasenas ahora se guardan hasheadas con bcrypt. Si tenian la base de
+la version anterior, al arrancar la app se migran solas. Igual conviene
+recrear todo con `docker compose down -v && docker compose up -d --build`
+(la base vieja se creo con `trust` y sin eso no se aplica la contrasena).
 
 ---
 
@@ -153,6 +156,7 @@ cafeteria-origen/
 | GET | `/api/reportes/ventas-por-variedad?variedad=` | Ventas por origen |
 | GET | `/api/comentarios` · POST `/api/comentarios` | Reseñas |
 | POST | `/api/auth/login` · `/api/auth/logout` · GET `/api/auth/yo` | Sesión |
+| GET | `/api/csrf-token` | Token anti-CSRF |
 | — | `/api/admin/*` | Panel (usuarios, productos, conexión, subida de archivos) |
 | GET | `/api/_diagnostico` | Diagnóstico del servidor |
 
