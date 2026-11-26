@@ -41,13 +41,11 @@ router.get('/ticket-promedio', async (req, res, next) => {
 
 /**
  * GET /api/reportes/ventas-por-variedad?variedad=
- *
- * FALLA — Inyección SQL: el origen se concatena en la consulta.
- * No se exige autenticación ni rol para ver la facturación.
+ * La variedad se valida con lista blanca y va como parámetro (ver servicio).
  */
 router.get('/ventas-por-variedad', async (req, res, next) => {
   try {
-    const variedad = (req.query.variedad as string | undefined) || '';
+    const variedad = typeof req.query.variedad === 'string' ? req.query.variedad : '';
     res.json({ ventas: await reportes.ventasPorVariedad(variedad) });
   } catch (err) {
     next(err);

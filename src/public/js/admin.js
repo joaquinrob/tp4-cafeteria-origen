@@ -1,5 +1,7 @@
 /* =============================================================================
    Cafetería Origen — lógica del panel de administración
+   Los datos del servidor se agregan al DOM con textContent / createElement.
+   Las peticiones que cambian algo llevan el token anti-CSRF.
    ============================================================================= */
 (function () {
   'use strict';
@@ -7,6 +9,7 @@
   var API = '/api';
   var usuario = null;
   var productosCache = {};
+  var tokenCsrf = null;
 
   function $(sel) { return document.querySelector(sel); }
   function $$(sel) { return Array.prototype.slice.call(document.querySelectorAll(sel)); }
@@ -15,15 +18,91 @@
     return Number(valor || 0).toLocaleString('es-AR', { style: 'currency', currency: 'ARS' });
   }
 
-  function raw(valor) {
-    // FALLA: no escapa nada. Usar escaparHtml() / textContent.
-    return String(valor == null ? '' : valor);
+  /* ------------------------------------------------------------- helpers DOM */
+  function crear(tag, clase, texto) {
+    var el = document.createElement(tag);
+    if (clase) el.className = clase;
+    if (texto !== undefined && texto !== null) el.textContent = String(texto);
+    return el;
   }
 
-  function escaparHtml(texto) {
-    var div = document.createElement('div');
-    div.textContent = texto == null ? '' : String(texto);
-    return div.innerHTML;
+  function vaciar(el) {
+    while (el.firstChild) el.removeChild(el.firstChild);
+  }
+
+  function mensajeVacio(el, texto) {
+    vaciar(el);
+    el.appendChild(crear('p', 'empty', texto));
+  }
+
+  // Arma una tabla: encabezados + filas (cada fila es un array de celdas,
+  // una celda puede ser texto o un elemento ya creado)
+  function llenarTabla(tabla, encabezados, filas) {
+    vaciar(tabla);
+    var thead = crear('thead');
+    var trHead = crear('tr');
+    encabezados.forEach(function (h) {
+      var th = crear('th', h.clase || '', h.texto);
+      trHead.appendChild(th);
+    });
+    thead.appendChild(trHead);
+    tabla.appendChild(thead);
+
+    var tbody = crear('tbody');
+    filas.forEach(function (fila) {
+      var tr = crear('tr');
+      fila.forEach(function (celda, i) {
+        var td = crear('td', encabezados[i] && encabezados[i].clase ? encabezados[i].clase : '');
+        if (celda instanceof Node) td.appendChild(celda);
+        else td.textContent = celda == null ? '' : String(celda);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    tabla.appendChild(tbody);
+  }
+
+  function crearSelect(clase, atributo, id, opciones, seleccionada) {
+    var select = crear('select', clase);
+    select.setAttribute(atributo, String(id));
+    opciones.forEach(function (op) {
+      var option = crear('option', '', op);
+      option.value = op;
+      if (op === seleccionada) option.selected = true;
+      select.appendChild(option);
+    });
+    return select;
+  }
+
+  function renderKpis(contenedor, kpis) {
+    vaciar(contenedor);
+    kpis.forEach(function (k) {
+      var div = crear('div', 'kpi');
+      div.appendChild(crear('div', 'kpi-label', k.label));
+      div.appendChild(crear('div', 'kpi-value', k.value));
+      contenedor.appendChild(div);
+    });
+  }
+
+  function feedback(el, mensaje, ok) {
+    el.className = 'form-feedback ' + (ok ? 'is-ok' : 'is-error');
+    el.textContent = mensaje;
+  }
+
+  /* -------------------------------------------------------------------- API */
+  // Se guarda la promesa y no el token: si dos formularios lo piden a la vez
+  // se usa el mismo pedido y no se pisan las cookies
+  function obtenerTokenCsrf() {
+    if (!tokenCsrf) {
+      tokenCsrf = fetch(API + '/csrf-token', { credentials: 'same-origin' })
+        .then(function (res) { return res.json(); })
+        .then(function (data) { return data.token; })
+        .catch(function (err) {
+          tokenCsrf = null;
+          throw err;
+        });
+    }
+    return tokenCsrf;
   }
 
   function api(url, opciones) {
@@ -34,34 +113,24 @@
     });
   }
 
-  function postJSON(url, cuerpo) {
-    return api(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cuerpo || {}),
+  // Petición que cambia estado: agrega el token CSRF
+  function enviar(metodo, url, cuerpo) {
+    return obtenerTokenCsrf().then(function (token) {
+      var opciones = {
+        method: metodo,
+        headers: { 'X-CSRF-Token': token },
+      };
+      if (cuerpo !== undefined) {
+        opciones.headers['Content-Type'] = 'application/json';
+        opciones.body = JSON.stringify(cuerpo);
+      }
+      return api(url, opciones);
     });
   }
 
-  function putJSON(url, cuerpo) {
-    return api(url, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cuerpo || {}),
-    });
-  }
-
-  function patchJSON(url, cuerpo) {
-    return api(url, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cuerpo || {}),
-    });
-  }
-
-  function feedback(el, mensaje, ok) {
-    el.className = 'form-feedback ' + (ok ? 'is-ok' : 'is-error');
-    el.innerHTML = mensaje;
-  }
+  function postJSON(url, cuerpo) { return enviar('POST', url, cuerpo || {}); }
+  function putJSON(url, cuerpo) { return enviar('PUT', url, cuerpo || {}); }
+  function patchJSON(url, cuerpo) { return enviar('PATCH', url, cuerpo || {}); }
 
   /* ------------------------------------------------------------------ login */
   function iniciarSesion(evento) {
@@ -74,8 +143,6 @@
       password: $('#login-password').value,
     }).then(function (resp) {
       if (!resp.ok) {
-        // FALLA (XSS reflejado): el mensaje del servidor (que incluye el
-        // usuario enviado) se pinta con innerHTML.
         feedback(caja, 'No pudimos iniciar sesión: ' + (resp.data.error || 'error desconocido'), false);
         return;
       }
@@ -89,15 +156,21 @@
       usuario = null;
       $('#vista-login').hidden = false;
       $('#vista-panel').hidden = true;
-      $('#admin-user').innerHTML = '';
+      vaciar($('#admin-user'));
     });
   }
 
   function mostrarPanel() {
     $('#vista-login').hidden = true;
     $('#vista-panel').hidden = false;
-    $('#admin-user').innerHTML =
-      'Sesión de <strong>' + raw(usuario.nombre) + '</strong> · rol: <strong>' + raw(usuario.rol) + '</strong>';
+
+    var caja = $('#admin-user');
+    vaciar(caja);
+    caja.appendChild(document.createTextNode('Sesión de '));
+    caja.appendChild(crear('strong', '', usuario.nombre));
+    caja.appendChild(document.createTextNode(' · rol: '));
+    caja.appendChild(crear('strong', '', usuario.rol));
+
     $('#panel-bienvenida').textContent = 'Hola, ' + usuario.nombre;
     cargarTodo();
   }
@@ -116,63 +189,60 @@
       api('/reportes/mas-vendido').then(function (m) {
         api('/reportes/cantidad-vendida').then(function (c) {
           var mas = m.data.producto;
-          var kpis = [
+          var porTipo = c.data.cantidadVendida || {};
+          renderKpis($('#kpis'), [
             { label: 'Facturación total', value: money(f.data.facturado) },
             { label: 'Pedidos registrados', value: f.data.pedidos },
-            {
-              label: 'Producto más vendido',
-              value: mas ? raw(mas.nombre) : '—',
-            },
+            { label: 'Producto más vendido', value: mas ? mas.nombre : '—' },
             {
               label: 'Unidades por tipo',
-              value: Object.keys(c.data.cantidadVendida || {})
-                .map(function (k) { return k + ': ' + c.data.cantidadVendida[k]; })
+              value: Object.keys(porTipo)
+                .map(function (k) { return k + ': ' + porTipo[k]; })
                 .join(' · ') || '—',
             },
-          ];
-
-          $('#kpis').innerHTML = kpis.map(function (k) {
-            return '<div class="kpi"><div class="kpi-label">' + raw(k.label) + '</div>' +
-              '<div class="kpi-value">' + raw(k.value) + '</div></div>';
-          }).join('');
+          ]);
         });
       });
     });
   }
 
   /* --------------------------------------------------------------- pedidos */
-  function tablaPedidos(filas, conAcciones) {
-    if (!filas || filas.length === 0) return '<p class="empty">No hay pedidos.</p>';
+  var ESTADOS = ['abierto', 'preparando', 'listo', 'entregado'];
 
-    var html = '<thead><tr><th>#</th><th>Mesa</th><th>Cliente</th><th>Estado</th>' +
-      '<th class="num">Total</th><th>Fecha</th>' + (conAcciones ? '<th>Acciones</th>' : '') + '</tr></thead><tbody>';
+  function tablaPedidos(tabla, filas, conAcciones) {
+    if (!filas || filas.length === 0) {
+      mensajeVacio(tabla, 'No hay pedidos.');
+      return;
+    }
 
-    filas.forEach(function (p) {
-      html += '<tr>' +
-        '<td>' + raw(p.id) + '</td>' +
-        '<td>' + raw(p.mesa) + '</td>' +
-        '<td>' + raw(p.cliente) + '</td>' +
-        '<td><span class="badge badge-' + raw(p.estado) + '">' + raw(p.estado) + '</span></td>' +
-        '<td class="num">' + money(p.total) + '</td>' +
-        '<td>' + new Date(p.creado_en).toLocaleString('es-AR') + '</td>' +
-        (conAcciones
-          ? '<td><select data-pedido="' + raw(p.id) + '" class="sel-estado">' +
-            ['abierto', 'preparando', 'listo', 'entregado'].map(function (e) {
-              return '<option value="' + e + '"' + (e === p.estado ? ' selected' : '') + '>' + e + '</option>';
-            }).join('') +
-            '</select></td>'
-          : '') +
-        '</tr>';
+    var encabezados = [
+      { texto: '#' }, { texto: 'Mesa' }, { texto: 'Cliente' }, { texto: 'Estado' },
+      { texto: 'Total', clase: 'num' }, { texto: 'Fecha' },
+    ];
+    if (conAcciones) encabezados.push({ texto: 'Acciones' });
+
+    var datos = filas.map(function (p) {
+      var estadoValido = ESTADOS.indexOf(p.estado) >= 0 ? p.estado : 'otro';
+      var fila = [
+        p.id,
+        p.mesa,
+        p.cliente,
+        crear('span', 'badge badge-' + estadoValido, p.estado),
+        money(p.total),
+        new Date(p.creado_en).toLocaleString('es-AR'),
+      ];
+      if (conAcciones) fila.push(crearSelect('sel-estado', 'data-pedido', p.id, ESTADOS, p.estado));
+      return fila;
     });
 
-    return html + '</tbody>';
+    llenarTabla(tabla, encabezados, datos);
   }
 
   function cargarPedidos() {
     api('/pedidos').then(function (resp) {
       var pedidos = resp.data.pedidos || [];
-      $('#tabla-pedidos').innerHTML = tablaPedidos(pedidos, true);
-      $('#tabla-ultimos').innerHTML = tablaPedidos(pedidos.slice(0, 5), false);
+      tablaPedidos($('#tabla-pedidos'), pedidos, true);
+      tablaPedidos($('#tabla-ultimos'), pedidos.slice(0, 5), false);
     });
   }
 
@@ -180,7 +250,7 @@
     var select = evento.target.closest('.sel-estado');
     if (!select) return;
     var id = select.getAttribute('data-pedido');
-    patchJSON('/pedidos/' + id + '/estado', { estado: select.value }).then(function (resp) {
+    patchJSON('/pedidos/' + encodeURIComponent(id) + '/estado', { estado: select.value }).then(function (resp) {
       if (!resp.ok) {
         alert('No se pudo cambiar el estado: ' + (resp.data.error || 'error'));
       }
@@ -193,22 +263,18 @@
     api('/productos').then(function (resp) {
       var productos = resp.data.productos || [];
       productosCache = {};
-      var html = '<thead><tr><th>#</th><th>Nombre</th><th>Tipo</th><th>Origen</th>' +
-        '<th class="num">Precio</th><th>Acciones</th></tr></thead><tbody>';
 
-      productos.forEach(function (p) {
+      var datos = productos.map(function (p) {
         productosCache[p.id] = p;
-        html += '<tr>' +
-          '<td>' + raw(p.id) + '</td>' +
-          '<td>' + raw(p.nombre) + '</td>' +
-          '<td>' + raw(p.tipo) + '</td>' +
-          '<td>' + raw(p.variedad || '—') + '</td>' +
-          '<td class="num">' + money(p.precio) + '</td>' +
-          '<td><button class="link-danger" data-borrar="' + raw(p.id) + '">Borrar</button></td>' +
-          '</tr>';
+        var boton = crear('button', 'link-danger', 'Borrar');
+        boton.setAttribute('data-borrar', String(p.id));
+        return [p.id, p.nombre, p.tipo, p.variedad || '—', money(p.precio), boton];
       });
 
-      $('#tabla-productos').innerHTML = html + '</tbody>';
+      llenarTabla($('#tabla-productos'), [
+        { texto: '#' }, { texto: 'Nombre' }, { texto: 'Tipo' }, { texto: 'Origen' },
+        { texto: 'Precio', clase: 'num' }, { texto: 'Acciones' },
+      ], datos);
     });
   }
 
@@ -228,7 +294,9 @@
       descripcion: $('#p-descripcion').value,
     };
 
-    var peticion = id ? putJSON('/admin/productos/' + id, cuerpo) : postJSON('/admin/productos', cuerpo);
+    var peticion = id
+      ? putJSON('/admin/productos/' + encodeURIComponent(id), cuerpo)
+      : postJSON('/admin/productos', cuerpo);
 
     peticion.then(function (resp) {
       if (!resp.ok) {
@@ -248,7 +316,7 @@
     var id = btn.getAttribute('data-borrar');
     if (!confirm('¿Borrar el producto #' + id + '?')) return;
 
-    api('/admin/productos/' + id, { method: 'DELETE' }).then(function (resp) {
+    enviar('DELETE', '/admin/productos/' + encodeURIComponent(id)).then(function (resp) {
       if (!resp.ok) alert('No se pudo borrar: ' + (resp.data.error || 'error'));
       cargarProductos();
     });
@@ -270,8 +338,12 @@
     }
 
     var archivo = input.files[0];
-    var lector = new FileReader();
+    if (archivo.size > 2 * 1024 * 1024) {
+      feedback(caja, 'El archivo tiene que pesar menos de 2 MB.', false);
+      return;
+    }
 
+    var lector = new FileReader();
     lector.onload = function () {
       var base64 = String(lector.result).split(',')[1] || '';
       postJSON('/admin/subir-archivo', {
@@ -295,16 +367,12 @@
       api('/reportes/ticket-promedio').then(function (t) {
         api('/reportes/mas-vendido').then(function (m) {
           var mas = m.data.producto;
-          var kpis = [
+          renderKpis($('#kpis-reportes'), [
             { label: 'Facturación', value: money(f.data.facturado) },
             { label: 'Pedidos', value: f.data.pedidos },
             { label: 'Ticket promedio', value: money(t.data.promedio) },
-            { label: 'Más vendido', value: mas ? raw(mas.nombre) + ' (' + raw(mas.unidades) + ')' : '—' },
-          ];
-          $('#kpis-reportes').innerHTML = kpis.map(function (k) {
-            return '<div class="kpi"><div class="kpi-label">' + raw(k.label) + '</div>' +
-              '<div class="kpi-value">' + raw(k.value) + '</div></div>';
-          }).join('');
+            { label: 'Más vendido', value: mas ? mas.nombre + ' (' + mas.unidades + ')' : '—' },
+          ]);
         });
       });
     });
@@ -313,44 +381,43 @@
   function consultarVentas() {
     var caja = $('#reporte-feedback');
     var variedad = $('#reporte-variedad').value;
+    var tabla = $('#tabla-ventas');
 
     api('/reportes/ventas-por-variedad?variedad=' + encodeURIComponent(variedad)).then(function (resp) {
       if (!resp.ok) {
         feedback(caja, 'Error: ' + (resp.data.error || 'desconocido'), false);
-        $('#tabla-ventas').innerHTML = '';
+        vaciar(tabla);
         return;
       }
       var ventas = resp.data.ventas || [];
-      var html = '<thead><tr><th>Origen</th><th>Producto</th><th class="num">Unidades</th>' +
-        '<th class="num">Total</th></tr></thead><tbody>';
-      ventas.forEach(function (v) {
-        html += '<tr><td>' + raw(v.variedad) + '</td><td>' + raw(v.nombre) + '</td>' +
-          '<td class="num">' + raw(v.unidades) + '</td><td class="num">' + money(v.total) + '</td></tr>';
-      });
-      $('#tabla-ventas').innerHTML = html + '</tbody>';
+      llenarTabla(tabla, [
+        { texto: 'Origen' }, { texto: 'Producto' },
+        { texto: 'Unidades', clase: 'num' }, { texto: 'Total', clase: 'num' },
+      ], ventas.map(function (v) {
+        return [v.variedad, v.nombre, v.unidades, money(v.total)];
+      }));
       feedback(caja, 'Consulta realizada.', true);
     });
   }
 
   /* -------------------------------------------------------------- usuarios */
+  var ROLES = ['cliente', 'mozo', 'barista', 'admin'];
+
   function cargarUsuarios() {
     api('/admin/usuarios').then(function (resp) {
       var usuarios = resp.data.usuarios || [];
-      var html = '<thead><tr><th>#</th><th>Usuario</th><th>Nombre</th><th>Rol</th><th>Acciones</th></tr></thead><tbody>';
-      usuarios.forEach(function (u) {
-        html += '<tr>' +
-          '<td>' + raw(u.id) + '</td>' +
-          '<td>' + raw(u.username) + '</td>' +
-          '<td>' + raw(u.nombre) + '</td>' +
-          '<td><span class="badge' + (u.rol === 'admin' ? ' badge-admin' : '') + '">' + raw(u.rol) + '</span></td>' +
-          '<td><select data-usuario="' + raw(u.id) + '" class="sel-rol">' +
-            ['cliente', 'mozo', 'barista', 'admin'].map(function (r) {
-              return '<option value="' + r + '"' + (r === u.rol ? ' selected' : '') + '>' + r + '</option>';
-            }).join('') +
-            '</select></td>' +
-          '</tr>';
+      var datos = usuarios.map(function (u) {
+        return [
+          u.id,
+          u.username,
+          u.nombre,
+          crear('span', 'badge' + (u.rol === 'admin' ? ' badge-admin' : ''), u.rol),
+          crearSelect('sel-rol', 'data-usuario', u.id, ROLES, u.rol),
+        ];
       });
-      $('#tabla-usuarios').innerHTML = html + '</tbody>';
+      llenarTabla($('#tabla-usuarios'), [
+        { texto: '#' }, { texto: 'Usuario' }, { texto: 'Nombre' }, { texto: 'Rol' }, { texto: 'Acciones' },
+      ], datos);
     });
   }
 
@@ -359,7 +426,7 @@
     if (!select) return;
     var id = select.getAttribute('data-usuario');
 
-    putJSON('/admin/usuarios/' + id, { rol: select.value }).then(function (resp) {
+    putJSON('/admin/usuarios/' + encodeURIComponent(id), { rol: select.value }).then(function (resp) {
       if (!resp.ok) alert('No se pudo actualizar: ' + (resp.data.error || 'error'));
       cargarUsuarios();
     });
@@ -368,12 +435,16 @@
   function cambiarPassword(evento) {
     evento.preventDefault();
     var caja = $('#password-feedback');
-    postJSON('/admin/cambiar-contrasena', { nueva: $('#nueva-password').value }).then(function (resp) {
+    postJSON('/admin/cambiar-contrasena', {
+      actual: $('#actual-password').value,
+      nueva: $('#nueva-password').value,
+    }).then(function (resp) {
       if (!resp.ok) {
         feedback(caja, 'No se pudo cambiar: ' + (resp.data.error || 'error desconocido'), false);
         return;
       }
       feedback(caja, 'Contraseña actualizada.', true);
+      $('#actual-password').value = '';
       $('#nueva-password').value = '';
     });
   }
@@ -384,7 +455,7 @@
     var salida = $('#salida-conexion');
     salida.textContent = 'Probando…';
 
-    postJSON('/admin/probar-conexion', { host: $('#conexion-host').value }).then(function (resp) {
+    postJSON('/admin/probar-conexion', { host: $('#conexion-host').value.trim() }).then(function (resp) {
       if (!resp.ok) {
         salida.textContent = 'Error: ' + (resp.data.error || 'desconocido');
         return;
@@ -418,13 +489,14 @@
 
   /* ------------------------------------------------------------------ init */
   function init() {
-    // FALLA (XSS de DOM): se lee un parámetro de la URL y se inyecta con
-    // innerHTML. Al abrir admin.html?vista=<script>...</script> se ejecuta
-    // código en el navegador del admin.
+    // El parámetro ?vista= de la URL solo se acepta si es el nombre de una de
+    // las pestañas del panel, y se muestra como texto, no como HTML (antes con
+    // admin.html?vista=<img src=x onerror=...> se ejecutaba código).
+    var VISTAS = ['resumen', 'pedidos', 'productos', 'reportes', 'usuarios', 'herramientas'];
     var params = new URLSearchParams(window.location.search);
     var objetivo = params.get('vista');
-    if (objetivo) {
-      $('#panel-bienvenida').innerHTML = 'Panel ' + objetivo;
+    if (objetivo && VISTAS.indexOf(objetivo) >= 0) {
+      $('#panel-bienvenida').textContent = 'Panel ' + objetivo;
     }
 
     $('#form-login').addEventListener('submit', iniciarSesion);

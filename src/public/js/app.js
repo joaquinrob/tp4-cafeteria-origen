@@ -1,5 +1,8 @@
 /* =============================================================================
    Cafetería Origen — lógica del sitio público
+   Todo lo que viene del servidor se pinta con textContent / createElement,
+   nunca armando HTML con strings (así un <script> en una reseña o en el
+   buscador se muestra como texto y no se ejecuta).
    ============================================================================= */
 (function () {
   'use strict';
@@ -22,11 +25,39 @@
     return n.toLocaleString('es-AR', { style: 'currency', currency: 'ARS' });
   }
 
-  function raw(valor) {
-    // FALLA: esta función NO escapa nada, devuelve el valor tal cual.
-    // La forma correcta de renderizar texto del servidor es escaparHtml()
-    // (o textContent en vez de innerHTML).
-    return String(valor == null ? '' : valor);
+  // Crea un elemento con clase y texto (el texto nunca se interpreta como HTML)
+  function crear(tag, clase, texto) {
+    var el = document.createElement(tag);
+    if (clase) el.className = clase;
+    if (texto !== undefined && texto !== null) el.textContent = String(texto);
+    return el;
+  }
+
+  function vaciar(el) {
+    while (el.firstChild) el.removeChild(el.firstChild);
+  }
+
+  function mensajeVacio(el, texto) {
+    vaciar(el);
+    el.appendChild(crear('p', 'empty', texto));
+  }
+
+  // Token anti-CSRF: se pide una vez y se manda en cada POST
+  var tokenCsrf = null;
+
+  // Se guarda la promesa y no el token: si dos formularios lo piden a la vez
+  // se usa el mismo pedido y no se pisan las cookies
+  function obtenerTokenCsrf() {
+    if (!tokenCsrf) {
+      tokenCsrf = fetch(API + '/csrf-token', { credentials: 'same-origin' })
+        .then(function (res) { return res.json(); })
+        .then(function (data) { return data.token; })
+        .catch(function (err) {
+          tokenCsrf = null;
+          throw err;
+        });
+    }
+    return tokenCsrf;
   }
 
   function api(url, opciones) {
@@ -38,10 +69,12 @@
   }
 
   function postJSON(url, cuerpo) {
-    return api(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cuerpo || {}),
+    return obtenerTokenCsrf().then(function (token) {
+      return api(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': token },
+        body: JSON.stringify(cuerpo || {}),
+      });
     });
   }
 
@@ -57,12 +90,6 @@
     } catch (e) {
       return [];
     }
-  }
-
-  function escaparHtml(texto) {
-    var div = document.createElement('div');
-    div.textContent = texto == null ? '' : String(texto);
-    return div.innerHTML;
   }
 
   /* ------------------------------------------------------------- catálogo */
@@ -90,51 +117,52 @@
     var grid = $('#productos-grid');
 
     if (!productos || productos.length === 0) {
-      grid.innerHTML = '<p class="empty">No encontramos productos con esos filtros.</p>';
+      mensajeVacio(grid, 'No encontramos productos con esos filtros.');
       return;
     }
 
-    // ---------------------------------------------------------------
-    // FALLA (XSS reflejado / almacenado): el HTML se construye con
-    // innerHTML a partir de datos que vienen del servidor (nombres de
-    // producto y texto de la búsqueda). Un "<script>" en el buscador o
-    // en el nombre de un producto se ejecuta en el navegador.
-    //
-    // Corrección: usar textContent, o escapar los valores antes de
-    // interpolarlos (ver la función escaparHtml de arriba).
-    // ---------------------------------------------------------------
-    grid.innerHTML = productos.map(function (p) {
+    vaciar(grid);
+    productos.forEach(function (p) {
       window.__productos[p.id] = p;
-      var tags = '<span class="tag">' + raw(p.tipo) + '</span>';
-      if (p.variedad) tags += '<span class="tag tag-origen">' + raw(p.variedad) + '</span>';
-      if (p.tamano) tags += '<span class="tag">' + raw(p.tamano) + '</span>';
 
-      return '' +
-        '<article class="product-card">' +
-        '  <div class="product-top">' +
-        '    <h3 class="product-name">' + raw(p.nombre) + '</h3>' +
-        '    <span class="product-price">' + money(p.precio) + '</span>' +
-        '  </div>' +
-        '  <div class="product-tags">' + tags + '</div>' +
-        '  <p class="product-desc">' + raw(p.descripcion) + '</p>' +
-        '  <button class="btn btn-ghost btn-agregar" data-id="' + raw(p.id) + '">Agregar</button>' +
-        '</article>';
-    }).join('');
+      var card = crear('article', 'product-card');
+
+      var top = crear('div', 'product-top');
+      top.appendChild(crear('h3', 'product-name', p.nombre));
+      top.appendChild(crear('span', 'product-price', money(p.precio)));
+      card.appendChild(top);
+
+      var tags = crear('div', 'product-tags');
+      tags.appendChild(crear('span', 'tag', p.tipo));
+      if (p.variedad) tags.appendChild(crear('span', 'tag tag-origen', p.variedad));
+      if (p.tamano) tags.appendChild(crear('span', 'tag', p.tamano));
+      card.appendChild(tags);
+
+      card.appendChild(crear('p', 'product-desc', p.descripcion));
+
+      var boton = crear('button', 'btn btn-ghost btn-agregar', 'Agregar');
+      boton.setAttribute('data-id', String(p.id));
+      card.appendChild(boton);
+
+      grid.appendChild(card);
+    });
   }
 
   function renderResultado(filtros, total) {
     var el = $('#resultado-busqueda');
+    vaciar(el);
 
-    // FALLA (XSS reflejado): se interpola el texto buscado con innerHTML.
     if (filtros && filtros.q) {
-      el.innerHTML = 'Resultados para <strong>' + filtros.q + '</strong> — ' + total + ' producto(s)';
+      el.appendChild(document.createTextNode('Resultados para '));
+      el.appendChild(crear('strong', '', filtros.q));
+      el.appendChild(document.createTextNode(' — ' + total + ' producto(s)'));
     } else {
       el.textContent = total + ' producto(s) en el menú';
     }
   }
 
   function renderErrorProductos(mensaje) {
-    $('#productos-grid').innerHTML = '<p class="empty">No se pudo cargar el menú: ' + (mensaje || 'error desconocido') + '</p>';
+    mensajeVacio($('#productos-grid'), 'No se pudo cargar el menú: ' + (mensaje || 'error desconocido'));
   }
 
   /* --------------------------------------------------------------- carrito */
@@ -172,43 +200,57 @@
     renderCarrito();
   }
 
+  function botonCarrito(texto, accion, indice, clase) {
+    var b = crear('button', clase || '', texto);
+    b.type = 'button';
+    b.setAttribute('data-acc', accion);
+    b.setAttribute('data-i', String(indice));
+    return b;
+  }
+
   function renderCarrito() {
     var cont = $('#carrito');
     var lista = $('#resumen-carrito');
     var total = 0;
 
+    vaciar(lista);
+
     if (estado.carrito.length === 0) {
-      cont.innerHTML = '<p class="empty">El carrito está vacío.</p>';
-      lista.innerHTML = '';
+      mensajeVacio(cont, 'El carrito está vacío.');
       $('#resumen-total').textContent = money(0);
       return;
     }
 
-    cont.innerHTML = estado.carrito.map(function (item, i) {
+    vaciar(cont);
+    estado.carrito.forEach(function (item, i) {
       var subtotal = item.precio * item.cantidad;
       total += subtotal;
-      return '' +
-        '<div class="cart-item">' +
-        '  <div>' +
-        '    <div class="cart-item-name">' + raw(item.nombre) + '</div>' +
-        '    <div class="cart-item-meta">' + money(item.precio) + ' c/u</div>' +
-        '  </div>' +
-        '  <div class="qty-control">' +
-        '    <button type="button" data-acc="menos" data-i="' + i + '">&minus;</button>' +
-        '    <span>' + item.cantidad + '</span>' +
-        '    <button type="button" data-acc="mas" data-i="' + i + '">+</button>' +
-        '  </div>' +
-        '  <div>' +
-        '    <div class="cart-item-price">' + money(subtotal) + '</div>' +
-        '    <button type="button" class="link-danger" data-acc="quitar" data-i="' + i + '">Quitar</button>' +
-        '  </div>' +
-        '</div>';
-    }).join('');
 
-    lista.innerHTML = estado.carrito.map(function (item) {
-      return '<li><span>' + raw(item.nombre) + ' × ' + item.cantidad + '</span><span>' +
-        money(item.precio * item.cantidad) + '</span></li>';
-    }).join('');
+      var fila = crear('div', 'cart-item');
+
+      var info = crear('div');
+      info.appendChild(crear('div', 'cart-item-name', item.nombre));
+      info.appendChild(crear('div', 'cart-item-meta', money(item.precio) + ' c/u'));
+      fila.appendChild(info);
+
+      var qty = crear('div', 'qty-control');
+      qty.appendChild(botonCarrito('−', 'menos', i));
+      qty.appendChild(crear('span', '', item.cantidad));
+      qty.appendChild(botonCarrito('+', 'mas', i));
+      fila.appendChild(qty);
+
+      var precio = crear('div');
+      precio.appendChild(crear('div', 'cart-item-price', money(subtotal)));
+      precio.appendChild(botonCarrito('Quitar', 'quitar', i, 'link-danger'));
+      fila.appendChild(precio);
+
+      cont.appendChild(fila);
+
+      var li = crear('li');
+      li.appendChild(crear('span', '', item.nombre + ' × ' + item.cantidad));
+      li.appendChild(crear('span', '', money(subtotal)));
+      lista.appendChild(li);
+    });
 
     $('#resumen-total').textContent = money(total);
   }
@@ -228,9 +270,8 @@
       }),
     }).then(function (resp) {
       if (!resp.ok) {
-        // FALLA (XSS reflejado): el mensaje del servidor se pinta con innerHTML.
         feedback.className = 'form-feedback is-error';
-        feedback.innerHTML = 'No pudimos enviar el pedido: ' + (resp.data.error || 'error desconocido');
+        feedback.textContent = 'No pudimos enviar el pedido: ' + (resp.data.error || 'error desconocido');
         return;
       }
       feedback.className = 'form-feedback is-ok';
@@ -247,32 +288,32 @@
   }
 
   /* --------------------------------------------------------------- reseñas */
-  function cargarReseñas() {
+  function cargarResenas() {
     return api('/comentarios').then(function (resp) {
       var cont = $('#lista-resenas');
       if (!resp.ok || !resp.data.comentarios || resp.data.comentarios.length === 0) {
-        cont.innerHTML = '<p class="empty">Todavía no hay reseñas. ¡Sé el primero!</p>';
+        mensajeVacio(cont, 'Todavía no hay reseñas. ¡Sé el primero!');
         return;
       }
-      // FALLA (XSS almacenado): el texto de la reseña viene de la base y se
-      // inyecta con innerHTML → se ejecuta en el navegador de cada visitante.
-      cont.innerHTML = resp.data.comentarios.map(function (c) {
-        var estrellas = '';
-        var i;
-        for (i = 0; i < Number(c.calificacion || 0); i++) estrellas += '★';
-        return '' +
-          '<article class="review">' +
-          '  <div class="review-head">' +
-          '    <span class="review-author">' + raw(c.autor) + '</span>' +
-          '    <span class="review-stars">' + estrellas + '</span>' +
-          '  </div>' +
-          '  <p class="review-text">' + raw(c.texto) + '</p>' +
-          '</article>';
-      }).join('');
+
+      vaciar(cont);
+      resp.data.comentarios.forEach(function (c) {
+        var cantidad = Math.max(0, Math.min(5, Number(c.calificacion) || 0));
+        var estrellas = new Array(cantidad + 1).join('★');
+
+        var review = crear('article', 'review');
+        var head = crear('div', 'review-head');
+        head.appendChild(crear('span', 'review-author', c.autor));
+        head.appendChild(crear('span', 'review-stars', estrellas));
+        review.appendChild(head);
+        review.appendChild(crear('p', 'review-text', c.texto));
+
+        cont.appendChild(review);
+      });
     });
   }
 
-  function enviarReseña(evento) {
+  function enviarResena(evento) {
     evento.preventDefault();
     var feedback = $('#resena-feedback');
     feedback.className = 'form-feedback';
@@ -285,13 +326,13 @@
     }).then(function (resp) {
       if (!resp.ok) {
         feedback.className = 'form-feedback is-error';
-        feedback.innerHTML = 'No se pudo publicar: ' + (resp.data.error || 'error desconocido');
+        feedback.textContent = 'No se pudo publicar: ' + (resp.data.error || 'error desconocido');
         return;
       }
       feedback.className = 'form-feedback is-ok';
       feedback.textContent = '¡Gracias por tu reseña!';
       $('#form-resena').reset();
-      cargarReseñas();
+      cargarResenas();
     });
   }
 
@@ -339,7 +380,7 @@
     });
 
     $('#form-pedido').addEventListener('submit', enviarPedido);
-    $('#form-resena').addEventListener('submit', enviarReseña);
+    $('#form-resena').addEventListener('submit', enviarResena);
 
     // Carga inicial
     api(urlCatalogo()).then(function (resp) {
@@ -351,7 +392,7 @@
         renderErrorProductos(resp.data.error);
       }
     });
-    cargarReseñas();
+    cargarResenas();
     renderCarrito();
   }
 

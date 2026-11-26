@@ -17,7 +17,7 @@ que los alumnos tienen que encontrar, observar, explicar y corregir.
 Requisitos: **Docker Desktop** (o Docker Engine + Compose v2).
 
 ```bash
-cd cafeteria-origen
+cd tp4-cafeteria-origen
 docker compose up -d --build
 ```
 
@@ -156,6 +156,7 @@ cafeteria-origen/
 | GET | `/api/reportes/ventas-por-variedad?variedad=` | Ventas por origen |
 | GET | `/api/comentarios` · POST `/api/comentarios` | Reseñas |
 | POST | `/api/auth/login` · `/api/auth/logout` · GET `/api/auth/yo` | Sesión |
+| GET | `/api/csrf-token` | Token anti-CSRF |
 | — | `/api/admin/*` | Panel (usuarios, productos, conexión, subida de archivos) |
 | GET | `/api/_diagnostico` | Diagnóstico del servidor |
 
